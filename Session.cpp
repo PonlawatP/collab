@@ -1,5 +1,7 @@
 #include "Session.hpp"
 #include "Collab/BuildFingerprint.generated.hpp"
+#include "Collab/Presence.hpp"
+#include "Collab/ProjectTransfer.hpp"
 #include "Collab/SyncSnapshot.hpp"
 #include <QDataStream>
 #include <QHostAddress>
@@ -12,6 +14,10 @@ namespace CppProject
 		Frame_HelloAccepted = 1, // host -> client: fingerprint matched, ready for Command traffic
 		Frame_HelloRejected = 2, // host -> client: fingerprint mismatch (payload = reason), then disconnect
 		Frame_Command = 3,
+		Frame_Presence = 4,      // peerId (qint64) + position (3x double) - never touches Object
+		Frame_ProjectData = 5,   // host -> client, sent BEFORE Frame_HelloAccepted: the host's whole
+		                         // project file, so instanceIds in the Command snapshot that follows
+		                         // actually resolve on the client
 	};
 
 	Session::~Session()
@@ -59,6 +65,7 @@ namespace CppProject
 		recvBuffers.clear();
 		handshaked.clear();
 		peerNames.clear();
+		peerIdsBySocket.clear();
 
 		if (server)
 		{
@@ -108,6 +115,8 @@ namespace CppProject
 		recvBuffers.remove(socket);
 		handshaked.remove(socket);
 		peerNames.remove(socket);
+		if (peerIdsBySocket.contains(socket))
+			Presence::Remove(peerIdsBySocket.take(socket));
 		socket->deleteLater();
 	}
 
@@ -128,6 +137,15 @@ namespace CppProject
 		command.Write(payloadStream);
 
 		SendFrame(socket, Frame_Command, payload);
+	}
+
+	void Session::SendPresenceFrame(QTcpSocket* socket, IntType peerId, const VecType& position)
+	{
+		QByteArray payload;
+		QDataStream payloadStream(&payload, QIODevice::WriteOnly);
+		payloadStream << (qint64)peerId << position.x << position.y << position.z;
+
+		SendFrame(socket, Frame_Presence, payload);
 	}
 
 	void Session::OnReadyRead()
@@ -182,6 +200,15 @@ namespace CppProject
 					handshaked.insert(socket);
 					peerNames[socket] = peerName;
 					DEBUG("Collab: client handshaked, name=" + peerName);
+
+					// Send the host's whole project BEFORE anything else, so the joining client is
+					// on the same project - the Command snapshot below references instanceIds that
+					// only resolve once this has been loaded (ProcessBufferedFrames handles each
+					// frame synchronously and in order, so this is guaranteed to run first).
+					QByteArray projectData = ProjectTransfer::CaptureCurrentProject();
+					if (!projectData.isEmpty())
+						SendFrame(socket, Frame_ProjectData, projectData);
+
 					SendFrame(socket, Frame_HelloAccepted, localPeerName.toUtf8());
 
 					// Late joiner: send it the current state of every syncable member so it
@@ -209,6 +236,15 @@ namespace CppProject
 				socket->disconnectFromHost();
 				break;
 
+			case Frame_ProjectData: // client side - arrives before Frame_HelloAccepted
+				DEBUG("Collab: received project data (" + NumStr(payload.size()) + " bytes), staged for next Tick()");
+				// Do NOT call ProjectTransfer::LoadProject() here - see the field comment on
+				// pendingProjectData (Session.hpp) for why loading a project from inside this
+				// socket callback corrupted GL state and froze the app.
+				pendingProjectData = payload;
+				hasPendingProjectData = true;
+				break;
+
 			case Frame_Command:
 			{
 				if (!handshaked.contains(socket))
@@ -224,7 +260,37 @@ namespace CppProject
 							SendCommand(other, command);
 				break;
 			}
+
+			case Frame_Presence:
+			{
+				if (!handshaked.contains(socket))
+					break; // ignore presence traffic from a socket that hasn't completed the handshake
+
+				qint64 peerId = 0;
+				RealType x = 0.0, y = 0.0, z = 0.0;
+				QDataStream payloadStream(payload);
+				payloadStream >> peerId >> x >> y >> z;
+
+				peerIdsBySocket[socket] = peerId;
+				Presence::Set(peerId, peerNames.value(socket), VecType(x, y, z));
+
+				if (IsHost()) // relay to every other handshaked client
+					for (QTcpSocket* other : sockets)
+						if (other != socket && handshaked.contains(other))
+							SendPresenceFrame(other, peerId, VecType(x, y, z));
+				break;
+			}
 		}
+	}
+
+	void Session::ApplyPendingProjectLoad()
+	{
+		if (!hasPendingProjectData)
+			return;
+
+		ProjectTransfer::LoadProject(pendingProjectData);
+		pendingProjectData.clear();
+		hasPendingProjectData = false;
 	}
 
 	void Session::Tick()
@@ -243,5 +309,15 @@ namespace CppProject
 			for (const Command& command : outgoing)
 				SendCommand(socket, command);
 		}
+	}
+
+	void Session::SendPresence(const VecType& position)
+	{
+		IntType peerId = SyncSnapshot::localPeerId;
+		Presence::Set(peerId, localPeerName, position);
+
+		for (QTcpSocket* socket : sockets)
+			if (handshaked.contains(socket))
+				SendPresenceFrame(socket, peerId, position);
 	}
 }

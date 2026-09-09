@@ -6,18 +6,18 @@ namespace CppProject
 	// protocol (.senior-mode/plans/2026-09-09-command-stream-protocol.md, Step 10) before real
 	// host/join UI exists (Phase 2). Remove once that UI ships.
 	//
-	// F7 hosts a session on port 24689. F8 connects to 127.0.0.1:24689 as a client. Marks
-	// app::cam_work_zoom_goal (the 3D workspace zoom TARGET - cam_work_zoom itself is a
-	// per-frame-interpolated display value derived from this goal, so syncing the goal lets each
-	// side's own existing smoothing animate its local zoom toward it) as the one syncable member.
-	//
-	// IMPORTANT: cam_work_zoom_goal is a PIPE-VERIFICATION vehicle only, not a real design
-	// decision. In the actual product, each client's viewport/camera navigation (cam_work_*) must
-	// stay independent/local per client - do not carry this member into the real syncable-member
-	// set once object/timeline/keyframe sync work starts.
+	// F7 hosts a session on port 24689. F8 connects to 127.0.0.1:24689 as a client. See
+	// .senior-mode/plans/2026-09-09-project-join-sync.md - a joining client now receives the
+	// host's whole project over the connection.
 	struct DebugTrigger
 	{
-		// Call once per frame from AppHandler::timerEvent.
+		// Call once per frame from AppHandler::timerEvent, BEFORE the per-window render loop.
+		// Drives Command/Presence sync - nothing here needs a bound GFX surface/shader.
 		static void Tick();
+
+		// Call once per frame from INSIDE AppHandler::timerEvent's per-window loop, after that
+		// window's GFX surface/shader are bound (see Session::ApplyPendingProjectLoad's comment
+		// for why this can't run from Tick() above). A no-op unless a project was just received.
+		static void RenderTick();
 	};
 }
