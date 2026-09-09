@@ -4,6 +4,7 @@
 #include "Asset/Object.hpp"
 #include "Asset/DataStructure.hpp" // List
 #include "Type/ArrType.hpp"
+#include <QList>
 #include "Generated/Scripts.hpp" // ID_obj_timeline, ID_obj_keyframe, M_save_id, M_keyframe_list,
                                   // M_position, M_value, tl_keyframe_add, tl_update_values,
                                   // tl_update_matrix, tl_update_length, app_update_tl_edit,
@@ -226,8 +227,24 @@ namespace CppProject
 					{
 						ds_list_delete_value(VarGetInt(listHandleVar), VarType(mapIt.value()));
 						tl_keyframe_add(ScopeAny(Scope<obj_timeline>(tl)), VarType(position), mapIt.value());
+
+						// tl_keyframe_add's own dedup logic (Generated/Scripts66.cpp:998-1013)
+						// silently SHIFTS the requested position forward if this receiver's
+						// timeline already has a DIFFERENT keyframe sitting exactly there - which
+						// can only happen if this peer's keyframe set has drifted from the
+						// sender's (e.g. a keyframe it created/moved locally, not yet observed by
+						// the sender). Log it - a shift here means the two sides now disagree on
+						// where this keyframe actually is.
+						VarType landedPosVar;
+						RealType landedPos = kfObj->TryGetValue(M_position, landedPosVar) ? VarGetReal(landedPosVar) : position;
+						if (landedPos != position)
+							WARNING("Collab: keyframe reposition landed at " + NumStr(landedPos) +
+								" instead of requested " + NumStr(position) +
+								" (local dedup-shift - kf=" + NumStr(mapIt.value()) + ")");
 					}
 				}
+				DEBUG("Collab: applying remote keyframe updated timeline=" + NumStr(timelineId) +
+					" position=" + NumStr(position) + " local kf=" + NumStr(mapIt.value()));
 				kfObj->SetValue(M_value, kfValue);
 				RefreshTimelineAfterKeyframeChange(tl);
 				return;
@@ -237,12 +254,59 @@ namespace CppProject
 			remoteKeyframeMap.erase(mapIt);
 		}
 
-		// Not tracked yet - brand new. Create first and set its value BEFORE calling
-		// tl_keyframe_add with an explicit kf id - this mirrors the engine's OWN "already-built
-		// keyframe" call pattern (Generated/Scripts12.cpp:670-698: `(new obj_keyframe)->id`
-		// populated, then `tl_keyframe_add(self, pos, newkf)`), which skips tl_keyframe_add's
-		// kf<0 branch that would otherwise seed the value from the LOCAL timeline's own current
-		// live value instead of the value actually received from the remote peer.
+		// Not tracked under this wire identity yet - but BOTH peers started from the identical
+		// project file at join time (.senior-mode/plans/2026-09-09-project-join-sync.md), so any
+		// keyframe that already existed before this collab session ever synced it (a "baseline"
+		// keyframe) sits at the SAME position on every peer's copy, under NO mapping at all - it
+		// was seeded into the SENDER's own lastKnownKeys silently on first observation
+        // (this file's "New known gap" section above) and never given a wire identity. The first
+		// time such a keyframe is actually edited and its Command arrives here, blindly creating
+		// a new local obj_keyframe would DUPLICATE it right next to the original (confirmed by a
+		// real test: server warned "landed at 6 instead of requested 5" - the position-5 create
+		// collided with the timeline's own pre-existing position-5 keyframe and got dedup-shifted
+		// instead of updating it). Adopt an existing UNMAPPED local keyframe at the exact target
+		// position instead of creating a new one, whenever one exists.
+		IntType adoptedKfId = null_;
+		{
+			VarType listHandleVar;
+			List* list = tl->TryGetValue(M_keyframe_list, listHandleVar) ? FindAssetOpt(List, VarGetInt(listHandleVar)) : nullptr;
+			if (list)
+			{
+				QList<IntType> claimedIds = remoteKeyframeMap.values();
+				for (IntType i = 0; i < list->vec.size(); i++)
+				{
+					IntType candidateId = VarGetInt(list->Value(i));
+					if (claimedIds.contains(candidateId))
+						continue; // already the mapped target of some other wire identity
+					Object* candidateObj = FindAssetOpt(Object, candidateId);
+					VarType candidatePosVar;
+					if (candidateObj && candidateObj->TryGetValue(M_position, candidatePosVar) &&
+						VarGetReal(candidatePosVar) == position)
+					{
+						adoptedKfId = candidateId;
+						break;
+					}
+				}
+			}
+		}
+
+		if (adoptedKfId != null_)
+		{
+			DEBUG("Collab: adopting existing local keyframe timeline=" + NumStr(timelineId) +
+				" position=" + NumStr(position) + " local kf=" + NumStr(adoptedKfId) +
+				" as the target of this wire identity (baseline keyframe, never synced before)");
+			remoteKeyframeMap[mapKey] = adoptedKfId;
+			FindAssetOpt(Object, adoptedKfId)->SetValue(M_value, kfValue);
+			RefreshTimelineAfterKeyframeChange(tl);
+			return;
+		}
+
+		// Genuinely brand new. Create first and set its value BEFORE calling tl_keyframe_add with
+		// an explicit kf id - this mirrors the engine's OWN "already-built keyframe" call pattern
+		// (Generated/Scripts12.cpp:670-698: `(new obj_keyframe)->id` populated, then
+		// `tl_keyframe_add(self, pos, newkf)`), which skips tl_keyframe_add's kf<0 branch that
+		// would otherwise seed the value from the LOCAL timeline's own current live value instead
+		// of the value actually received from the remote peer.
 		Object* kfObj = new obj_keyframe();
 		kfObj->SetValue(M_value, kfValue);
 
