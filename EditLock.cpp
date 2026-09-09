@@ -31,6 +31,12 @@ namespace CppProject
 		return it != locks.constEnd() && it.value().peerId != peerId;
 	}
 
+	bool EditLock::IsLockedByPeer(IntType instanceId, IntType peerId)
+	{
+		auto it = locks.constFind(instanceId);
+		return it != locks.constEnd() && it.value().peerId == peerId;
+	}
+
 	QHash<IntType, EditLock::Lock> EditLock::GetAll()
 	{
 		return locks;

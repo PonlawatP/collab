@@ -2,8 +2,9 @@
 #include "Collab/EditLock.hpp"
 #include "Collab/SyncSnapshot.hpp"
 #include "Collab/SyncRegistry.hpp"
+#include "Collab/KeyframeSync.hpp"
 #include "Asset/Object.hpp"
-#include "Generated/Scripts.hpp" // save_id_find, null_
+#include "Generated/Scripts.hpp" // save_id_find, null_, ID_obj_keyframe
 
 namespace CppProject
 {
@@ -12,6 +13,7 @@ namespace CppProject
 	void CommandSink::Tick()
 	{
 		outgoing += SyncSnapshot::CaptureTick();
+		outgoing += KeyframeSync::CaptureTick();
 	}
 
 	QVector<Command> CommandSink::DrainOutgoing()
@@ -23,6 +25,15 @@ namespace CppProject
 
 	void CommandSink::ApplyRemoteCommand(const Command& command)
 	{
+		// Keyframe structural commands (create/remove) use a completely different addressing
+		// scheme (a compound key, not a save_id) and aren't part of SyncRegistry's per-member
+		// allowlist at all - dispatch before the generic value-sync path below even looks at them.
+		if (command.subAssetId == ID_obj_keyframe)
+		{
+			KeyframeSync::ApplyRemoteCommand(command);
+			return;
+		}
+
 		// Defensive: ignore a remote command targeting a member we don't recognize as syncable.
 		if (!SyncRegistry::IsSyncable(command.subAssetId, command.memberId))
 		{

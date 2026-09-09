@@ -3,7 +3,7 @@
 #include "Collab/SyncRegistry.hpp"
 #include "Collab/SyncSnapshot.hpp"
 #include "Generated/GmlFunc.hpp" // keyboard_check_pressed, vk_f7, vk_f8
-#include "Generated/Scripts.hpp" // M_cam_work_focus, ID_obj_timeline, M_world_pos, global::_app, global::tl_edit, null_
+#include "Generated/Scripts.hpp" // M_cam_work_focus, ID_obj_timeline, M_matrix_render, global::_app, global::tl_edit, null_
 
 namespace CppProject
 {
@@ -26,11 +26,15 @@ namespace CppProject
 		static BoolType syncableRegistered = false;
 		if (!syncableRegistered)
 		{
-			// obj_timeline::world_pos is a live member - read directly by render_world_tl for
-			// rendering, not re-derived from keyframes at render time (confirmed via
-			// .senior-mode/plans/2026-09-10-edit-lock-presence.md's Step 1 findings) - so it's
-			// safe to sync the same way M_cam_work_zoom_goal was already proven to work.
-			SyncRegistry::MarkSyncable(ID_obj_timeline, M_world_pos);
+			// obj_timeline::world_pos looked live but ISN'T - it's overwritten every time
+			// tl_update_matrix() runs (Generated/Scripts68.cpp:21+), and is only ever actually
+			// read for the debug/selection click-box (Generated/Scripts51.cpp:1029), not the
+			// rendered mesh - confirmed by testing (position writes had zero visual effect).
+			// matrix_render IS the real live transform: matrix_set(matrix_world,
+			// sMat(matrix_render)) is read fresh every render call (Generated/Scripts51.cpp:1167)
+			// and nothing recomputes it absent another explicit action, so an external write
+			// persists and actually renders. Syncs full position+rotation+scale as one unit.
+			SyncRegistry::MarkSyncable(ID_obj_timeline, M_matrix_render);
 			syncableRegistered = true;
 		}
 

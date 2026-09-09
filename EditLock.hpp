@@ -31,6 +31,14 @@ namespace CppProject
 		// CommandSink::ApplyRemoteCommand to reject a conflicting edit instead of applying it.
 		static bool IsLockedByOther(IntType instanceId, IntType peerId);
 
+		// True if instanceId is locked specifically BY peerId - used by SyncSnapshot to only
+		// broadcast an instance's state while the local peer is actively editing it (holds the
+		// lock). Without this, ANY change to a syncable member - including one caused merely by
+		// scrubbing/playing the timeline, which changes a timeline instance's rendered transform
+		// every frame without editing anything - would broadcast and make playback bleed across
+		// peers instead of staying independent per client.
+		static bool IsLockedByPeer(IntType instanceId, IntType peerId);
+
 		static QHash<IntType, Lock> GetAll();
 
 	private:

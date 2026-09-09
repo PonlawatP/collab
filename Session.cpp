@@ -1,6 +1,7 @@
 #include "Session.hpp"
 #include "Collab/BuildFingerprint.generated.hpp"
 #include "Collab/EditLock.hpp"
+#include "Collab/KeyframeSync.hpp"
 #include "Collab/Presence.hpp"
 #include "Collab/ProjectTransfer.hpp"
 #include "Collab/SyncSnapshot.hpp"
@@ -126,6 +127,7 @@ namespace CppProject
 			IntType peerId = peerIdsBySocket.take(socket);
 			Presence::Remove(peerId);
 			EditLock::RemovePeer(peerId);
+			KeyframeSync::RemovePeer(peerId);
 		}
 		socket->deleteLater();
 	}
