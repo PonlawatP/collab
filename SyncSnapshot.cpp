@@ -1,6 +1,7 @@
 #include "SyncSnapshot.hpp"
 #include "Collab/SyncRegistry.hpp"
 #include "Asset/Object.hpp"
+#include "Generated/Scripts.hpp" // M_save_id
 
 namespace CppProject
 {
@@ -22,6 +23,15 @@ namespace CppProject
 				if (!obj)
 					continue; // instance list and live asset can be momentarily out of sync
 
+				// The receiver can NEVER resolve command.instanceId directly (Asset::id depends on
+				// in-process allocation order, not stable across processes) - it must resolve via
+				// save_id_find(saveId) instead, so every Command for this instance needs its
+				// save_id attached. Skip the instance entirely if it doesn't have one - nothing
+				// downstream could ever apply it anyway.
+				VarType saveId;
+				if (!obj->TryGetValue(M_save_id, saveId))
+					continue;
+
 				for (IntType memberId : members)
 				{
 					VarType value;
@@ -42,6 +52,7 @@ namespace CppProject
 					Command cmd;
 					cmd.peerId = localPeerId;
 					cmd.instanceId = instanceId;
+					cmd.saveId = saveId;
 					cmd.subAssetId = subAssetId;
 					cmd.memberId = memberId;
 					cmd.sequence = ++sequence;

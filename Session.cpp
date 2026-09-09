@@ -1,8 +1,11 @@
 #include "Session.hpp"
 #include "Collab/BuildFingerprint.generated.hpp"
+#include "Collab/EditLock.hpp"
 #include "Collab/Presence.hpp"
 #include "Collab/ProjectTransfer.hpp"
 #include "Collab/SyncSnapshot.hpp"
+#include "Asset/Object.hpp"
+#include "Generated/Scripts.hpp" // M_save_id, save_id_find, null_
 #include <QDataStream>
 #include <QHostAddress>
 
@@ -18,6 +21,9 @@ namespace CppProject
 		Frame_ProjectData = 5,   // host -> client, sent BEFORE Frame_HelloAccepted: the host's whole
 		                         // project file, so instanceIds in the Command snapshot that follows
 		                         // actually resolve on the client
+		Frame_EditLock = 6,      // saveId (VarType, NOT instanceId - see Collab/CommandSink.cpp for
+		                         // why a raw instanceId means nothing cross-process) + peerId (qint64)
+		                         // + locked (quint8 1/0) - never touches Object/Command
 	};
 
 	Session::~Session()
@@ -116,7 +122,11 @@ namespace CppProject
 		handshaked.remove(socket);
 		peerNames.remove(socket);
 		if (peerIdsBySocket.contains(socket))
-			Presence::Remove(peerIdsBySocket.take(socket));
+		{
+			IntType peerId = peerIdsBySocket.take(socket);
+			Presence::Remove(peerId);
+			EditLock::RemovePeer(peerId);
+		}
 		socket->deleteLater();
 	}
 
@@ -146,6 +156,16 @@ namespace CppProject
 		payloadStream << (qint64)peerId << position.x << position.y << position.z;
 
 		SendFrame(socket, Frame_Presence, payload);
+	}
+
+	void Session::SendEditLockFrame(QTcpSocket* socket, const VarType& saveId, IntType peerId, bool locked)
+	{
+		QByteArray payload;
+		QDataStream payloadStream(&payload, QIODevice::WriteOnly);
+		WriteVarType(payloadStream, saveId);
+		payloadStream << (qint64)peerId << (quint8)(locked ? 1 : 0);
+
+		SendFrame(socket, Frame_EditLock, payload);
 	}
 
 	void Session::OnReadyRead()
@@ -280,6 +300,45 @@ namespace CppProject
 							SendPresenceFrame(other, peerId, VecType(x, y, z));
 				break;
 			}
+
+			case Frame_EditLock:
+			{
+				if (!handshaked.contains(socket))
+					break; // ignore lock traffic from a socket that hasn't completed the handshake
+
+				QDataStream payloadStream(payload);
+				VarType saveId = ReadVarType(payloadStream);
+				qint64 peerId = 0;
+				quint8 lockedByte = 0;
+				payloadStream >> peerId >> lockedByte;
+
+				peerIdsBySocket[socket] = peerId;
+
+				// saveId is the sender's stable identifier - resolve it to OUR OWN local
+				// instanceId the same way CommandSink::ApplyRemoteCommand does (a raw instanceId
+				// would mean nothing here). EditLock is always keyed by local instanceId.
+				IntType instanceId = VarGetInt(save_id_find(saveId));
+				if (instanceId == null_)
+				{
+					WARNING("Collab: edit lock message's save_id not found locally (save_id=" +
+						saveId.ToStr() + ")");
+					break; // can't resolve it locally, so can't relay it meaningfully either
+				}
+
+				DEBUG("Collab: edit lock " + QString(lockedByte ? "acquired" : "released") +
+					" instance=" + NumStr(instanceId) + " peerId=" + NumStr(peerId));
+				if (lockedByte)
+					EditLock::Set(instanceId, peerId, peerNames.value(socket));
+				else
+					EditLock::Clear(instanceId);
+
+				if (IsHost()) // relay to every other handshaked client, using the ORIGINAL
+				              // saveId - each of them must resolve it in their OWN id space
+					for (QTcpSocket* other : sockets)
+						if (other != socket && handshaked.contains(other))
+							SendEditLockFrame(other, saveId, peerId, lockedByte != 0);
+				break;
+			}
 		}
 	}
 
@@ -319,5 +378,32 @@ namespace CppProject
 		for (QTcpSocket* socket : sockets)
 			if (handshaked.contains(socket))
 				SendPresenceFrame(socket, peerId, position);
+	}
+
+	void Session::BroadcastEditLock(IntType instanceId, bool locked)
+	{
+		IntType peerId = SyncSnapshot::localPeerId;
+		DEBUG("Collab: local edit lock " + QString(locked ? "acquired" : "released") +
+			" instance=" + NumStr(instanceId));
+
+		// Local EditLock storage is always keyed by OUR OWN local instanceId - no translation
+		// needed here, only for what goes out over the wire (below).
+		if (locked)
+			EditLock::Set(instanceId, peerId, localPeerName);
+		else
+			EditLock::Clear(instanceId);
+
+		Object* obj = FindAssetOpt(Object, instanceId);
+		VarType saveId;
+		if (!obj || !obj->TryGetValue(M_save_id, saveId))
+		{
+			WARNING("Collab: could not broadcast edit lock - instance=" + NumStr(instanceId) +
+				" has no resolvable save_id");
+			return;
+		}
+
+		for (QTcpSocket* socket : sockets)
+			if (handshaked.contains(socket))
+				SendEditLockFrame(socket, saveId, peerId, locked);
 	}
 }

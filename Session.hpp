@@ -58,6 +58,14 @@ namespace CppProject
 		// Object::SetValue, so it can never overwrite another peer's (or our own) engine state.
 		void SendPresence(const VecType& position);
 
+		// Call whenever the local user's selection (obj_timeline instance) changes - pass the
+		// LOCAL instanceId being (de)selected and whether it's now locked (true = acquiring,
+		// false = releasing). Records it locally in Collab::EditLock (keyed by local instanceId,
+		// as always) and broadcasts the instance's stable save_id (never the local instanceId
+		// itself - meaningless cross-process, same reasoning as Command - see
+		// Collab/CommandSink.cpp) to every handshaked peer. Never touches Command/SyncRegistry.
+		void BroadcastEditLock(IntType instanceId, bool locked);
+
 		// Our own display name, exchanged with the other side during the handshake. Hardcoded by
 		// the caller for now (Collab/DebugTrigger sets "Host"/"Client") - a real name entry UI is
 		// Phase 2. Must be set before Host()/ConnectToHost().
@@ -84,6 +92,7 @@ namespace CppProject
 		void SendFrame(QTcpSocket* socket, quint8 type, const QByteArray& payload);
 		void SendCommand(QTcpSocket* socket, const Command& command);
 		void SendPresenceFrame(QTcpSocket* socket, IntType peerId, const VecType& position);
+		void SendEditLockFrame(QTcpSocket* socket, const VarType& saveId, IntType peerId, bool locked);
 		void ProcessBufferedFrames(QTcpSocket* socket);
 		void HandleFrame(QTcpSocket* socket, quint8 type, const QByteArray& payload);
 
@@ -92,7 +101,7 @@ namespace CppProject
 		QHash<QTcpSocket*, QByteArray> recvBuffers;
 		QSet<QTcpSocket*> handshaked; // sockets that completed the build-fingerprint handshake
 		QHash<QTcpSocket*, QString> peerNames; // handshaked socket -> the other side's display name
-		QHash<QTcpSocket*, IntType> peerIdsBySocket; // learned from the first Frame_Presence seen on that socket - lets disconnect clean up Presence
+		QHash<QTcpSocket*, IntType> peerIdsBySocket; // learned from the first Frame_Presence/Frame_EditLock seen on that socket - lets disconnect clean up Presence/EditLock
 
 		// A received Frame_ProjectData is NOT loaded immediately in the socket callback -
 		// project_load() resets/recreates a large amount of engine state, and doing that from

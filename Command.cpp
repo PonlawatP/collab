@@ -129,6 +129,7 @@ namespace CppProject
 	void Command::Write(QDataStream& stream) const
 	{
 		stream << (qint64)peerId << (qint64)instanceId << (qint64)subAssetId << (qint64)memberId << (qint64)sequence;
+		WriteVarType(stream, saveId);
 		WriteVarType(stream, value);
 	}
 
@@ -142,6 +143,7 @@ namespace CppProject
 		cmd.subAssetId = subAssetId;
 		cmd.memberId = memberId;
 		cmd.sequence = sequence;
+		cmd.saveId = ReadVarType(stream);
 		cmd.value = ReadVarType(stream);
 		return cmd;
 	}
